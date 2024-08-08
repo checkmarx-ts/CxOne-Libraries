@@ -13,50 +13,63 @@
 #>
 
 # Get timestamp for Logs
-function getTime() {
+function Get-Timestamp() {
     return "[{0:MM/dd/yyyy} {0:HH:mm:ss.fff K}]" -f (Get-Date)
 }
 
-#log message to Console
-function log($message, $warning = $false) {
-    $formattedMessage = "$(getTime) ${message}"
-    if(!$warning){
-        Write-Host $formattedMessage
-    } else{
-        Write-Warning $formattedMessage
-    }
+# Log message to Console
+function Log-Message {
+	param (
+		[$string]$Message,
+		[bool]$isWarning = $false
+	)
+ 
+	$formattedMessage = "$(Get-TimeStamp) $Message"
+	if ( -not $IsWarning) {
+		Write-Host $formattedMessage
+	} else{
+		Write-Warning $formattedMessage
+	}
 }
 
-function GetToken() {
-    $uri = "$($this.IAMUrl)/auth/realms/$($this.Tenant)/protocol/openid-connect/token"
+function Get-Token {
+    param (
+        [string]$IAMUrl,
+        [string]$Tenant,
+        [string]$APIKey,
+        [string]$ClientID,
+        [string]$ClientSecret,
+        [string]$Proxy = ""
+    )
+
+    $uri = "$IAMUrl/auth/realms/$Tenant/protocol/openid-connect/token"
     $body = @{}
-    if ($null -ne $this.APIKey) {
+
+    if ($null -ne $APIKey) {
         $body["client_id"] = "ast-app"
-        $body["refresh_token"] = (Plaintext($this.APIKey))
+        $body["refresh_token"] = (ConvertTo-SecureString -String $APIKey -AsPlainText -Force)
         $body["grant_type"] = "refresh_token"
     } else {
-        $body["client_id"] = $this.ClientID
-        $body["client_secret"] = (Plaintext($this.ClientSecret))
+        $body["client_id"] = $ClientID
+        $body["client_secret"] = (ConvertTo-SecureString -String $ClientSecret -AsPlainText -Force)
         $body["grant_type"] = "client_credentials"
     }
 
-    try  {
-        $resp = $null
-        if ( $this.Proxy -eq "" ) {
-            $resp = Invoke-RestMethod -uri $uri -method "POST" -body $body 
+    try {
+        $response = if ($Proxy -eq "") {
+            Invoke-RestMethod -Uri $uri -Method "POST" -Body $body
         } else {
-            $resp = Invoke-RestMethod -uri $uri -method "POST" -body $body -Proxy $this.Proxy
+            Invoke-RestMethod -Uri $uri -Method "POST" -Body $body -Proxy $Proxy
         }
 
-        $this.Token = ConvertTo-SecureString $resp.access_token -AsPlainText -Force
-        $this.Expiry = (Get-Date).AddSeconds( $resp.expires_in - 60 ) # let's refresh the token a minute early
+        $global:Token = ConvertTo-SecureString -String $response.access_token -AsPlainText -Force
+        $global:Expiry = (Get-Date).AddSeconds($response.expires_in - 60) # Refresh the token a minute early
     } catch {
-        log $_ $true
-        $value = $_.Exception.Response.StatusCode.value__
-        $description = $_.Exception.Response.StatusDescription
-        log "StatusCode: ${value}" 
-        log "StatusDescription: ${description}" 
-        throw $errorMessage
+        Log-Message -Message $_.Exception.Message -IsWarning $true
+        $statusCode = $_.Exception.Response.StatusCode.value__
+        $statusDescription = $_.Exception.Response.StatusDescription
+        Log-Message -Message "StatusCode: $statusCode" 
+        Log-Message -Message "StatusDescription: $statusDescription"
     }
 }
 
