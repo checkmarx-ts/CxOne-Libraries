@@ -1,0 +1,227 @@
+package Cx1ClientGo
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/url"
+	"time"
+)
+
+func (r *Role) String() string {
+	return fmt.Sprintf("[%v] %v", ShortenGUID(r.RoleID), r.Name)
+}
+
+func (r *Role) HasCategory(name string) bool {
+	for _, role := range r.Attributes.Category {
+		if role == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (r *Role) HasRole(name string) bool {
+	for _, r := range r.SubRoles {
+		if r.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (c Cx1Client) GetIAMRoles() ([]Role, error) {
+	c.logger.Debugf("Getting KeyCloak Roles")
+	var roles []Role
+
+	response, err := c.sendRequestIAM(http.MethodGet, "/auth/admin", "/roles?briefRepresentation=true", nil, nil)
+	if err != nil {
+		return roles, err
+	}
+
+	err = json.Unmarshal(response, &roles)
+	c.logger.Tracef("Got %d roles", len(roles))
+	return roles, err
+}
+
+func (c Cx1Client) GetIAMRoleByName(name string) (Role, error) {
+	c.logger.Debugf("Getting KeyCloak Role named %v", name)
+	var role Role
+	response, err := c.sendRequestIAM(http.MethodGet, "/auth/admin", fmt.Sprintf("/roles/%v", url.QueryEscape(name)), nil, nil)
+	if err != nil {
+		return role, err
+	}
+
+	err = json.Unmarshal(response, &role)
+	return role, err
+}
+
+func (c Cx1Client) GetRolesByClientID(clientId string) ([]Role, error) {
+	c.logger.Debugf("Getting roles for client %v", clientId)
+	var roles []Role
+
+	response, err := c.sendRequestIAM(http.MethodGet, "/auth/admin", fmt.Sprintf("/clients/%v/roles?briefRepresentation=true", clientId), nil, nil)
+	if err != nil {
+		return roles, err
+	}
+
+	err = json.Unmarshal(response, &roles)
+	c.logger.Tracef("Got %d roles", len(roles))
+	return roles, err
+}
+
+func (c Cx1Client) GetRoleByClientIDAndName(clientId string, name string) (Role, error) {
+	c.logger.Debugf("Getting KeyCloak Roles for client %v with name %v", clientId, name)
+	var role Role
+
+	response, err := c.sendRequestIAM(http.MethodGet, "/auth/admin", fmt.Sprintf("/clients/%v/roles/%v", clientId, url.PathEscape(name)), nil, nil)
+	if err != nil {
+		return role, err
+	}
+
+	err = json.Unmarshal(response, &role)
+	return role, err
+}
+
+func (c Cx1Client) GetRoleComposites(role *Role) ([]Role, error) {
+	var roles []Role
+	response, err := c.sendRequestIAM(http.MethodGet, "/auth/admin", fmt.Sprintf("/roles-by-id/%v/composites", role.RoleID), nil, nil)
+	if err != nil {
+		return roles, err
+	}
+
+	err = json.Unmarshal(response, &roles)
+	return roles, err
+}
+
+func (c Cx1Client) AddRoleComposites(role *Role, roles *[]Role) error {
+	if len(*roles) == 0 {
+		return fmt.Errorf("no role IDs provided")
+	}
+
+	roleList := make([]struct {
+		ID string `json:"id"`
+	}, len(*roles))
+
+	for id, role := range *roles {
+		roleList[id].ID = role.RoleID
+	}
+
+	jsonBody, _ := json.Marshal(roleList)
+	_, err := c.sendRequestIAM(http.MethodPost, "/auth/admin", fmt.Sprintf("/roles-by-id/%v/composites", role.RoleID), bytes.NewReader(jsonBody), nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c Cx1Client) RemoveRoleComposites(role *Role, roles *[]Role) error {
+	if len(*roles) == 0 {
+		return fmt.Errorf("no role IDs provided")
+	}
+
+	roleList := make([]struct {
+		ID string `json:"id"`
+	}, len(*roles))
+	for id, role := range *roles {
+		roleList[id].ID = role.RoleID
+	}
+
+	jsonBody, _ := json.Marshal(roleList)
+	_, err := c.sendRequestIAM(http.MethodDelete, "/auth/admin", fmt.Sprintf("/roles-by-id/%v/composites", role.RoleID), bytes.NewReader(jsonBody), nil)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func (c Cx1Client) CreateAppRole(roleName, createdBy string) (Role, error) {
+	c.logger.Debugf("User %v creating client role %v", createdBy, roleName)
+	data := map[string]interface{}{
+		"name":       roleName,
+		"composite":  true,
+		"clientRole": true,
+		"attributes": map[string]interface{}{
+			"category":   []string{"Composite role"},
+			"type":       []string{"Role"},
+			"creator":    []string{fmt.Sprintf("SAST2CX1 by %v", createdBy)},
+			"lastUpdate": []int64{time.Now().UnixMilli()},
+		},
+	}
+	jsonBody, err := json.Marshal(data)
+	if err != nil {
+		c.logger.Tracef("Failed to marshal data somehow: %s", err)
+		return Role{}, err
+	}
+	_, err = c.sendRequestIAM(http.MethodPost, "/auth/admin", fmt.Sprintf("/clients/%v/roles", c.GetASTAppID()), bytes.NewReader(jsonBody), nil)
+	if err != nil {
+		c.logger.Tracef("Failed to create a client role %v: %s", roleName, err)
+		return Role{}, err
+	}
+
+	return c.GetRoleByClientIDAndName(c.GetASTAppID(), roleName)
+}
+
+func (c Cx1Client) GetRoleByID(roleId string) (Role, error) {
+	response, err := c.sendRequestIAM(http.MethodGet, "/auth/admin", fmt.Sprintf("/roles-by-id/%v", roleId), nil, nil)
+	var role Role
+	if err != nil {
+		return role, err
+	}
+
+	err = json.Unmarshal(response, &role)
+	return role, err
+}
+
+func (c Cx1Client) DeleteRoleByID(roleId string) error {
+	_, err := c.sendRequestIAM(http.MethodDelete, "/auth/admin", fmt.Sprintf("/roles-by-id/%v", roleId), nil, nil)
+	return err
+}
+
+func (c Cx1Client) GetAppRoles() ([]Role, error) {
+	c.logger.Debug("Getting roles set for ast-app client")
+	return c.GetRolesByClientID(c.GetASTAppID())
+}
+
+func (c Cx1Client) GetAppRoleByName(name string) (Role, error) {
+	c.logger.Debugf("Getting role named %v in ast-app client", name)
+	return c.GetRoleByClientIDAndName(c.GetASTAppID(), name)
+}
+
+// convenience function to get both KeyCloak (system) roles plus the AST-APP-specific roles
+func (c Cx1Client) GetRoles() ([]Role, error) {
+	c.logger.Debug("Getting all available roles")
+	ast_roles, err := c.GetAppRoles()
+	if err != nil {
+		return ast_roles, err
+	}
+	system_roles, err := c.GetIAMRoles()
+	if err != nil {
+		return ast_roles, err
+	}
+
+	ast_roles = append(ast_roles, system_roles...)
+	return ast_roles, nil
+}
+
+func (c Cx1Client) GetRoleByName(name string) (Role, error) {
+	c.logger.Debugf("Getting any role named: %v", name)
+
+	role, err := c.GetAppRoleByName(name)
+	if err == nil {
+		return role, nil
+	}
+	role, err = c.GetIAMRoleByName(name)
+	if err == nil {
+		return role, nil
+	}
+
+	return Role{}, fmt.Errorf("Role %v not found", name)
+}
+
+func (c Cx1Client) RoleLink(r *Role) string {
+	return fmt.Sprintf("%v/auth/admin/%v/console/#/realms/%v/roles/%v", c.iamUrl, c.tenant, c.tenant, r.RoleID)
+}
